@@ -1,0 +1,32 @@
+{
+  "manifest_version": 2,
+  "name": "YT Ingest Bookmarker",
+  "version": "1.0.0",
+  "description": "Bookmark YouTube links to a local text file for pipeline ingestion.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "nativeMessaging",
+    "storage"
+  ],
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "YT Ingest Bookmarker",
+    "default_icon": {
+      "48": "icons/icon48.png"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+  "icons": {
+    "48": "icons/icon48.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "yt-ingest-bookmarker@local",
+      "strict_min_version": "91.0"
+    }
+  }
+}
