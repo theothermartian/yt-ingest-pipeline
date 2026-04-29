@@ -1,0 +1,21 @@
+{
+  "output_dir": "~/yt-ingest-pipeline/output",
+  "log_file": "~/yt-ingest-pipeline/ingest.log",
+  "nlm": {
+    "notebook_prefix": "YT:",
+    "delete_notebook_after_download": false,
+    "source_wait_seconds": 35,
+    "poll_interval_seconds": 20,
+    "poll_max_attempts": 45,
+    "report": {
+      "enabled": true
+    },
+    "infographic": {
+      "enabled": true,
+      "orientation": "portrait",
+      "detail_level": "detailed",
+      "style": "professional",
+      "focus": "Technical architecture overview: key components, data flows, algorithms, and core concepts from the video. Use visual hierarchy to show relationships. Suitable for a graduate CS course reference sheet."
+    }
+  }
+}

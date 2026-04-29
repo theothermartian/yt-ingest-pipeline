@@ -1,12 +1,38 @@
 # YT Ingest Pipeline
 
-A Firefox extension that bookmarks the current YouTube video to a local text file and fires a bash hook so you can pipe the URL into yt-dlp, a transcript script, an LLM, a queue, or whatever you like.
+A Firefox extension that bookmarks the current YouTube video and automatically runs it through a full **NotebookLM pipeline**: creates a notebook, generates a structured technical summary (Markdown with YAML frontmatter) and an infographic (PNG), then downloads both to a local output folder.
+
+One click in the browser → files on disk, ready for Obsidian or any downstream tool.
+
+## How it works
+
+```
+Firefox button click
+  → native host saves URL to bookmarks.txt
+  → fires on_bookmark.sh in background
+      → creates NotebookLM notebook
+      → adds YouTube URL as source
+      → generates technical summary report + infographic
+      → polls until both are ready (~2 min)
+      → downloads to output/YYYY-MM-DD_<title-slug>/
+      → writes manifest.json
+```
 
 ## Prerequisites
 
 - macOS (Apple Silicon assumed; see notes if Intel)
 - Firefox 91+
 - Node.js: `brew install node` — must end up at `/opt/homebrew/bin/node`
+- Python 3 (ships with macOS)
+- [`nlm` CLI](https://github.com/nnll/notebooklm-mcp-cli): `pip install notebooklm-mcp-cli` or `uv tool install notebooklm-mcp-cli`
+
+After installing `nlm`, authenticate once:
+
+```bash
+nlm login
+```
+
+Sessions expire. Re-run `nlm login` if the pipeline logs an auth error.
 
 ## Setup
 
@@ -20,7 +46,7 @@ macOS TCC (Transparency, Consent, Control) blocks Firefox from launching the nat
 
 If you try, `sendNativeMessage` fails silently in the popup and the Browser Console shows `Operation not permitted`.
 
-You have two options:
+Options:
 
 1. **Recommended:** clone somewhere else, e.g. `~/yt-ingest-pipeline` or `~/code/yt-ingest-pipeline`. `install.sh` refuses to run from the protected folders.
 2. **Alternative:** grant Firefox Full Disk Access in **System Settings → Privacy & Security → Full Disk Access**, then you can keep it in `~/Documents`.
@@ -46,16 +72,13 @@ Requires `xpinstall.signatures.required` = `false` in `about:config` (Firefox De
 
 1. Build the XPI (requires Node.js, which you already have):
    ```bash
-   cd yt-ingest-pipeline
    npx web-ext build --source-dir extension
    ```
-   This creates `web-ext-artifacts/yt_ingest_bookmarker-1.0.0.zip` (Firefox treats `.zip` as `.xpi`).
+   This creates `web-ext-artifacts/yt_ingest_bookmarker-1.0.0.zip`.
 
 2. **Fully quit Firefox** (Cmd+Q) and relaunch.
 3. Open `about:addons` → gear icon (⚙) → **Install Add-on From File…**
 4. Pick the `.zip` file produced above.
-
-The extension is now permanently installed and survives restarts.
 
 #### Option B: Temporary add-on (no build needed, reloads on restart)
 
@@ -64,6 +87,43 @@ The extension is now permanently installed and survives restarts.
 3. Pick `extension/manifest.json`.
 
 Visit a YouTube video page, click the toolbar icon, hit **Bookmark this video**.
+
+## Output
+
+Each bookmark creates a folder under `output/`:
+
+```
+output/
+└── 2026-04-29_video-title-slug/
+    ├── summary.md        ← structured Markdown with YAML frontmatter
+    ├── infographic.png   ← visual overview
+    ├── manifest.json     ← title, URL, notebook ID, artifact paths
+    └── nlm_ops.log       ← raw nlm CLI output for debugging
+```
+
+`summary.md` is structured for Obsidian ingestion: it starts with YAML frontmatter (`title`, `source_url`, `topic_tags`, `difficulty_level`, `key_concepts`) followed by seven fixed sections (Concept Foundation, Technical Architecture, Key Contributions, Worked Example, Critical Analysis, Prerequisites, Practitioner Takeaways).
+
+## Configuration
+
+All pipeline settings live in `pipeline_config.json`:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `output_dir` | `~/yt-ingest-pipeline/output` | Where per-video folders are created |
+| `log_file` | `~/yt-ingest-pipeline/ingest.log` | Append-only pipeline log |
+| `nlm.notebook_prefix` | `"YT:"` | Prefix for NotebookLM notebook titles |
+| `nlm.delete_notebook_after_download` | `false` | Auto-delete the NLM notebook after downloading |
+| `nlm.source_wait_seconds` | `35` | Wait after adding source before generating |
+| `nlm.poll_interval_seconds` | `20` | How often to poll artifact status |
+| `nlm.poll_max_attempts` | `45` | Timeout = interval × attempts (default 15 min) |
+| `nlm.report.enabled` | `true` | Toggle report generation |
+| `nlm.infographic.enabled` | `true` | Toggle infographic generation |
+| `nlm.infographic.orientation` | `portrait` | `portrait` / `landscape` / `square` |
+| `nlm.infographic.detail_level` | `detailed` | `concise` / `standard` / `detailed` |
+| `nlm.infographic.style` | `professional` | `professional` / `sketch_note` / `bento_grid` / etc. |
+| `nlm.infographic.focus` | *(prompt hint)* | Free-text hint for infographic content |
+
+Paths support `~` and `$PIPELINE_DIR` tokens.
 
 ## File layout
 
@@ -76,35 +136,50 @@ yt-ingest-pipeline/
 │   ├── background.js
 │   └── icons/icon48.png
 ├── native-host/
-│   ├── yt_bookmark_host.js             # The active Node.js native host
-│   ├── host_wrapper.sh                 # Bash wrapper that execs node (rewritten by install.sh)
-│   └── com.yt_ingest.bookmarker.json   # Source copy of NM manifest (rewritten by install.sh)
-├── install.sh                          # One-time setup script (re-run if you move the folder)
-├── on_bookmark.sh                      # Bash hook — edit this for your pipeline
-├── bookmarks.txt                       # Appended on each save
-├── ingest.log                          # Written by on_bookmark.sh
-└── host_debug.log                      # Wrapper + host debug trace
+│   ├── yt_bookmark_host.js             # Node.js native messaging host
+│   ├── host_wrapper.sh                 # Rewritten by install.sh (gitignored)
+│   └── com.yt_ingest.bookmarker.json   # Rewritten by install.sh (gitignored)
+├── install.sh                          # One-time setup (re-run if you move the folder)
+├── on_bookmark.sh                      # Full NLM pipeline hook
+├── pipeline_config.json                # All tunable settings
+├── bookmarks.txt                       # Appended on each save (gitignored)
+├── ingest.log                          # Pipeline log (gitignored)
+├── host_debug.log                      # Native host debug trace (gitignored)
+└── output/                             # Generated artifacts (gitignored)
+    └── YYYY-MM-DD_<slug>/
+        ├── summary.md
+        ├── infographic.png
+        ├── manifest.json
+        └── nlm_ops.log
+```
+
+## Monitoring
+
+```bash
+# Watch the pipeline in real time
+tail -f ~/yt-ingest-pipeline/ingest.log
+
+# If something fails, check the per-video nlm log
+cat ~/yt-ingest-pipeline/output/<slug>/nlm_ops.log
 ```
 
 ## Architecture: why the native host has hardcoded paths
 
-A reasonable question when reading this code: "If the XPI is a standalone bundle, why are there absolute paths anywhere?"
+The XPI **is** standalone — `extension/*.js` has no hardcoded paths. But the extension can't write to the filesystem or run shell commands; that's Firefox's sandbox. To break out, it uses **Native Messaging**: it asks Firefox to launch a registered external program and pipes JSON to it over stdin/stdout.
 
-The XPI **is** standalone — `extension/*.js` has no hardcoded paths. But the extension can't write to the filesystem or run shell commands; that's Firefox's sandbox. To break out, it uses **Native Messaging**: it asks Firefox to launch a registered external program and pipes JSON to it over stdin/stdout. The XPI references that program only by name (`com.yt_ingest.bookmarker`).
-
-For Firefox to know what that name maps to on this machine, there's a separate manifest at `~/Library/Application Support/Mozilla/NativeMessagingHosts/com.yt_ingest.bookmarker.json`. By spec, its `path` field **must be absolute** — there's no `$PATH` lookup, no "relative to the XPI" option, and the XPI cannot install this file itself (it's sandboxed). That's the entire reason `install.sh` exists as a separate setup step.
-
-So:
+For Firefox to know what program to launch, there's a manifest at `~/Library/Application Support/Mozilla/NativeMessagingHosts/com.yt_ingest.bookmarker.json`. By spec, its `path` field **must be absolute** — no `$PATH` lookup, no relative paths. That's why `install.sh` exists.
 
 | Component | Hardcoded? | Why |
 |---|---|---|
-| The XPI / extension code | No | Truly portable. Reload it on any machine. |
-| `yt_bookmark_host.js` PIPELINE_DIR | No — derived from `__dirname` | Self-locates wherever the project lives. |
-| `host_wrapper.sh` paths | No — derived from `$SCRIPT_DIR` | Same. |
-| `/opt/homebrew/bin/node` in the wrapper | **Yes** | Firefox-spawned processes inherit a minimal `$PATH` — no shell, no nvm, no `.zshrc`. `node` alone would fail with "command not found". |
-| `path` field in the installed NM manifest | **Yes** | Firefox spec requires an absolute path. `install.sh` writes this dynamically based on where you cloned, so it isn't committed-hardcoded; it's install-time-resolved. |
+| Extension code | No | Truly portable |
+| `yt_bookmark_host.js` PIPELINE_DIR | No — from `__dirname` | Self-locates at runtime |
+| `host_wrapper.sh` paths | No — from `$SCRIPT_DIR` | Same |
+| `/opt/homebrew/bin/node` in the wrapper | **Yes** | Firefox-spawned processes inherit a minimal `$PATH` — no shell, no nvm, no `.zshrc` |
+| `path` in the installed NM manifest | **Yes** | Firefox spec requirement; written by `install.sh` at install time |
 
-Short version: the XPI is portable. The native host is **machine-specific by design** — that's the price of breaking out of the browser sandbox, and `install.sh` is what makes it not painful.
+**Note on PATH in `on_bookmark.sh`:** Firefox GUI apps inherit only the launchd system PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). The script explicitly prepends `/opt/homebrew/bin`, `/usr/local/bin`, and `~/.local/bin` so that `nlm`, `python3`, and other tools are findable regardless of where they were installed.
+
+**Note on stdout/stderr:** The native host spawns `on_bookmark.sh` with stdio inherited from Firefox. fd 1 is the live native-messaging pipe back to Firefox; Firefox closes its read end within milliseconds of getting the host's response. Any write to fd 1 after that point receives SIGPIPE, which with `set -euo pipefail` silently kills the script. The script seals both fds with `exec 1>/dev/null 2>/dev/null` as its first action. All output goes through `ingest.log` instead.
 
 ## bookmarks.txt format
 
@@ -116,50 +191,50 @@ Tab-separated, one entry per line:
 
 ## Customizing on_bookmark.sh
 
-The hook runs in the background (detached) after each successful bookmark. It receives:
+`on_bookmark.sh` is the NLM pipeline by default. You can replace it with anything — it receives:
 
 | Variable | Value |
 |---|---|
-| `$1` / `$YT_URL` | YouTube URL |
+| `$1` / `$URL` | YouTube URL |
 | `$YT_TITLE` | Video title |
-| `$YT_TIMESTAMP` | ISO 8601 timestamp |
+| `$YT_TIMESTAMP` | Timestamp |
 
-Examples (already commented in the file):
+Examples:
 
 ```bash
 yt-dlp -x --audio-format mp3 -o "$PIPELINE_DIR/audio/%(id)s.%(ext)s" "$URL"
 python3 "$PIPELINE_DIR/ingest.py" "$URL"
-curl -s -X POST http://localhost:8080/ingest \
-     -d "{\"url\": \"$URL\"}" -H "Content-Type: application/json"
+curl -s -X POST http://localhost:8080/ingest -d "{\"url\":\"$URL\"}" -H "Content-Type: application/json"
 ```
 
-The hook uses `dirname "$0"` for paths, so it stays portable.
+Keep `exec 1>/dev/null 2>/dev/null` at the top and write any output to a log file rather than stdout.
 
 ## Troubleshooting
 
 **The popup says "Failed to contact native host" or "An unexpected error occurred."**
 
-The popup's Web Console only shows generic errors. The real reason is in the **Browser Console**:
-
-- macOS: **Cmd+Shift+J** (Tools → Browser Tools → Browser Console)
-- Look for lines starting with `Native messaging error:` or anything from `com.yt_ingest.bookmarker`.
+Check the **Browser Console** (Cmd+Shift+J), not the page console. Look for `Native messaging error:` or anything from `com.yt_ingest.bookmarker`.
 
 **Browser Console says `Operation not permitted`**
 
-The project is in a TCC-protected folder (`~/Documents`, `~/Desktop`, `~/Downloads`). Move it elsewhere and re-run `./install.sh`, or grant Firefox Full Disk Access. See the Setup section.
+The project is in a TCC-protected folder. Move it and re-run `./install.sh`, or grant Firefox Full Disk Access.
 
 **You changed the manifest / reinstalled — nothing happens**
 
-Firefox caches the native-host registry per session. **Fully quit Firefox** (Cmd+Q) and relaunch. Reloading the extension in `about:debugging` is not enough.
+Firefox caches the native-host registry per session. **Fully quit Firefox** (Cmd+Q) and relaunch.
 
 **`allowed_extensions` confusion**
 
-The manifest's `allowed_extensions` must contain the gecko ID from `extension/manifest.json` (`yt-ingest-bookmarker@local`), **not** the brace-wrapped UUID Firefox shows in `about:debugging`. The UUID is internal and changes per profile; it does not authorize anything.
+`allowed_extensions` must contain the gecko ID `yt-ingest-bookmarker@local` from `extension/manifest.json`, **not** the brace-wrapped UUID Firefox shows in `about:debugging`.
 
 **Node not found**
 
-`install.sh` requires `/opt/homebrew/bin/node`. If yours lives elsewhere (Intel Mac, nvm, asdf, etc.), edit `NODE_BIN` at the top of `install.sh` and re-run it.
+`install.sh` expects `/opt/homebrew/bin/node`. If yours is elsewhere (Intel Mac, nvm, asdf), edit `NODE_BIN` at the top of `install.sh` and re-run it.
 
-**Inspect the host's own log**
+**Pipeline starts but nlm fails**
 
-`host_debug.log` in the project root records every wrapper launch and every message received/error thrown by the Node host. `tail -f host_debug.log` while clicking the button is usually enough to see what's wrong.
+Check `ingest.log` for the error message and `output/<slug>/nlm_ops.log` for the raw nlm output. Common causes:
+
+- `nlm CLI not found` — `nlm` isn't in the PATH locations the script prepends. Find it with `which nlm` and add its directory to the `PATH=` line in `on_bookmark.sh`.
+- `nlm session expired` — run `nlm login` and retry.
+- Artifact generation failed — the notebook is retained with its ID in the log; inspect it manually with `nlm studio status <id>`.
