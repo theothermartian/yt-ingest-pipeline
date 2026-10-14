@@ -111,9 +111,11 @@ All pipeline settings live in `pipeline_config.json`:
 |-----|---------|-------------|
 | `output_dir` | `~/yt-ingest-pipeline/output` | Where per-video folders are created |
 | `log_file` | `~/yt-ingest-pipeline/ingest.log` | Append-only pipeline log |
+| `skip_if_already_processed` | `true` | Skip a video (matched by video ID) that already has a complete output folder; failed runs stay retryable |
 | `nlm.notebook_prefix` | `"YT:"` | Prefix for NotebookLM notebook titles |
 | `nlm.delete_notebook_after_download` | `false` | Auto-delete the NLM notebook after downloading |
-| `nlm.source_wait_seconds` | `35` | Wait after adding source before generating |
+| `nlm.source_wait_seconds` | `35` | Fixed fallback wait, used only if `nlm source list` output can't be parsed |
+| `nlm.source_ready_timeout_seconds` | `180` | Max time to poll for the video to finish indexing |
 | `nlm.poll_interval_seconds` | `20` | How often to poll artifact status |
 | `nlm.poll_max_attempts` | `45` | Timeout = interval × attempts (default 15 min) |
 | `nlm.report.enabled` | `true` | Toggle report generation |

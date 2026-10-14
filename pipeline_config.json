@@ -1,10 +1,12 @@
 {
   "output_dir": "~/yt-ingest-pipeline/output",
   "log_file": "~/yt-ingest-pipeline/ingest.log",
+  "skip_if_already_processed": true,
   "nlm": {
     "notebook_prefix": "YT:",
     "delete_notebook_after_download": false,
     "source_wait_seconds": 35,
+    "source_ready_timeout_seconds": 180,
     "poll_interval_seconds": 20,
     "poll_max_attempts": 45,
     "report": {

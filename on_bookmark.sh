@@ -58,7 +58,42 @@ INF_FOCUS=$(cfg "nlm.infographic.focus")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 ts()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
-log() { echo "[$(ts)] $*" >> "$LOG_FILE"; }
+log() {
+    echo "[$(ts)] $*" >> "$LOG_FILE"
+    case "$*" in ERROR:*) LAST_ERROR="${*#ERROR: }" ;; esac
+}
+
+# ── Desktop notification (best effort) ────────────────────────────────────────
+# Runs detached with all output discarded: a missing notifier, no display
+# (headless Linux), or a hung D-Bus can never fail or block the pipeline.
+notify() {
+    local title="$1" msg="$2"
+    (
+        case "$(uname -s)" in
+            Darwin)
+                command -v osascript >/dev/null 2>&1 && osascript \
+                    -e 'on run argv' \
+                    -e 'display notification (item 2 of argv) with title (item 1 of argv)' \
+                    -e 'end run' "$title" "$msg"
+                ;;
+            Linux)
+                command -v notify-send >/dev/null 2>&1 && notify-send "$title" "$msg"
+                ;;
+        esac
+    ) >/dev/null 2>&1 </dev/null &
+    return 0
+}
+
+LAST_ERROR=""
+VIDEO_LOCK=""
+on_exit() {
+    local code=$?
+    [ -n "$VIDEO_LOCK" ] && rm -rf "$VIDEO_LOCK"
+    if [ "$code" -ne 0 ]; then
+        notify "YT Ingest failed" "${LAST_ERROR:-See ingest.log} — ${YT_TITLE:-$URL}"
+    fi
+}
+trap on_exit EXIT
 
 # ── Error trap ────────────────────────────────────────────────────────────────
 on_error() {
@@ -71,6 +106,53 @@ on_error() {
 }
 trap 'on_error $LINENO $?' ERR
 
+# ── Skip videos already summarized ────────────────────────────────────────────
+# Matched by YouTube video ID (so &t=… etc. don't matter). Only a run whose
+# manifest and artifacts all exist counts — failed runs stay retryable.
+VIDEO_ID=$(python3 -c '
+import sys, urllib.parse as u
+p = u.urlparse(sys.argv[1])
+print((u.parse_qs(p.query).get("v") or [""])[0])
+' "$URL")
+mkdir -p "$OUTPUT_BASE"
+SKIP_DONE=$(cfg "skip_if_already_processed" 2>/dev/null || echo true)
+if [ -n "$VIDEO_ID" ] && [ "$SKIP_DONE" != "false" ]; then
+    DONE_DIR=$(python3 - "$OUTPUT_BASE" "$VIDEO_ID" <<'PYEOF'
+import glob, json, os, sys, urllib.parse as u
+base, vid = sys.argv[1], sys.argv[2]
+for mf in sorted(glob.glob(os.path.join(base, "*", "manifest.json"))):
+    try:
+        with open(mf) as fh:
+            m = json.load(fh)
+    except Exception:
+        continue
+    q = u.parse_qs(u.urlparse(m.get("url", "")).query)
+    if (q.get("v") or [""])[0] != vid:
+        continue
+    d = os.path.dirname(mf)
+    paths = [os.path.join(d, f) for f in m.get("artifacts", {}).values()]
+    if all(os.path.isfile(p) and os.path.getsize(p) > 0 for p in paths):
+        print(d)
+        break
+PYEOF
+)
+    if [ -n "$DONE_DIR" ]; then
+        log "SKIP: $URL already summarized in $DONE_DIR"
+        notify "YT Ingest: already summarized" "${YT_TITLE:-$URL}"
+        exit 0
+    fi
+
+    # Guard against double-bookmarking while a run for this video is in flight.
+    # mkdir is atomic; locks older than 30 min are treated as stale.
+    LOCK_PATH="${OUTPUT_BASE}/.inflight-${VIDEO_ID}"
+    find "$LOCK_PATH" -maxdepth 0 -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+    if ! mkdir "$LOCK_PATH" 2>/dev/null; then
+        log "SKIP: $URL is already being processed by another run"
+        exit 0
+    fi
+    VIDEO_LOCK="$LOCK_PATH"
+fi
+
 # ── Output folder ─────────────────────────────────────────────────────────────
 DATE_PREFIX=$(date -u +%Y-%m-%d)
 TITLE_SLUG=$(printf '%s' "$YT_TITLE" \
@@ -79,6 +161,12 @@ TITLE_SLUG=$(printf '%s' "$YT_TITLE" \
     | sed 's/^-//; s/-$//' \
     | cut -c1-55)
 OUT_DIR="${OUTPUT_BASE}/${DATE_PREFIX}_${TITLE_SLUG}"
+# Re-bookmarking the same video on the same day must not clobber the earlier run.
+if [ -e "$OUT_DIR" ]; then
+    n=2
+    while [ -e "${OUT_DIR}-${n}" ]; do n=$((n + 1)); done
+    OUT_DIR="${OUT_DIR}-${n}"
+fi
 OPS_LOG="${OUT_DIR}/nlm_ops.log"
 
 mkdir -p "$OUT_DIR"
@@ -110,7 +198,17 @@ NB_TITLE="${NB_PREFIX} ${YT_TITLE}"
 log "Creating notebook: $NB_TITLE"
 NB_CREATE_OUT=$(nlm notebook create "$NB_TITLE" 2>>"$OPS_LOG")
 printf '%s\n' "$NB_CREATE_OUT" >>"$OPS_LOG"
-NB_ID=$(printf '%s\n' "$NB_CREATE_OUT" | awk '/ID:/{print $NF}')
+# nlm >=0.15 emits JSON ({"notebook_id": ...}) when stdout is not a TTY;
+# older versions print a "  ID: <uuid>" line. Handle both.
+NB_ID=$(printf '%s\n' "$NB_CREATE_OUT" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("notebook_id") or d.get("id") or "")
+except Exception:
+    pass
+' 2>/dev/null)
+[ -z "$NB_ID" ] && NB_ID=$(printf '%s\n' "$NB_CREATE_OUT" | awk '/ID:/{print $NF}')
 if [ -z "$NB_ID" ]; then
     log "ERROR: nlm notebook create returned an empty ID. Check $OPS_LOG"
     exit 1
@@ -120,8 +218,44 @@ log "Notebook ID: $NB_ID"
 # ── Add YouTube source ────────────────────────────────────────────────────────
 log "Adding source: $URL"
 nlm source add "$NB_ID" --youtube "$URL" >>"$OPS_LOG" 2>&1
-log "Source queued. Waiting ${SOURCE_WAIT}s for NotebookLM to index the video..."
-sleep "$SOURCE_WAIT"
+# Poll until every source reports status 2 (ready) instead of a blind sleep.
+# Prints: ready | waiting:<statuses> | unparseable
+_SOURCE_READY_PY=$(cat <<'PYEOF'
+import json, sys
+try:
+    items = json.load(sys.stdin)
+    statuses = [s.get("status") for s in items]
+    if statuses and all(st == 2 for st in statuses):
+        print("ready")
+    else:
+        print("waiting:" + ",".join(str(st) for st in statuses))
+except Exception:
+    print("unparseable")
+PYEOF
+)
+SOURCE_TIMEOUT=$(cfg "nlm.source_ready_timeout_seconds" 2>/dev/null || echo 180)
+log "Source queued. Waiting for NotebookLM to index the video (max ${SOURCE_TIMEOUT}s)..."
+waited=0
+while true; do
+    SRC_STATE=$(nlm source list "$NB_ID" --json 2>>"$OPS_LOG" \
+        | python3 -c "$_SOURCE_READY_PY" || echo unparseable)
+    if [ "$SRC_STATE" = "ready" ]; then
+        log "Source indexed after ${waited}s."
+        break
+    fi
+    if [ "$SRC_STATE" = "unparseable" ]; then
+        # nlm output changed shape — fall back to the old fixed wait.
+        log "WARN: could not read source status; falling back to fixed ${SOURCE_WAIT}s wait."
+        sleep "$SOURCE_WAIT"
+        break
+    fi
+    if [ "$waited" -ge "$SOURCE_TIMEOUT" ]; then
+        log "WARN: source not ready after ${SOURCE_TIMEOUT}s ($SRC_STATE); continuing anyway."
+        break
+    fi
+    sleep 5
+    waited=$((waited + 5))
+done
 
 # ── Generate report ───────────────────────────────────────────────────────────
 if [ "$REPORT_ENABLED" = "true" ]; then
@@ -222,10 +356,21 @@ PYEOF
 
 # Returns: completed | in_progress | failed | pending | unknown
 check_artifact_status() {
-    local artifact_type="$1"
-    nlm studio status "$NB_ID" --json 2>>"$OPS_LOG" \
-    | python3 -c "$_ARTIFACT_STATUS_PY" "$artifact_type" \
-    || echo 'unknown'
+    local artifact_type="$1" status probe
+    status=$(nlm studio status "$NB_ID" --json 2>>"$OPS_LOG" \
+        | python3 -c "$_ARTIFACT_STATUS_PY" "$artifact_type" \
+        || echo 'unknown')
+    # nlm 0.15.4 reports finished "Create Your Own" reports as status "unknown"
+    # forever. A successful, non-empty download proves the artifact is done.
+    if [ "$status" = "unknown" ]; then
+        probe=$(mktemp)
+        if nlm download "$artifact_type" "$NB_ID" --output "$probe" >/dev/null 2>&1 \
+           && [ -s "$probe" ]; then
+            status="completed"
+        fi
+        rm -f "$probe"
+    fi
+    echo "$status"
 }
 
 log "Polling every ${POLL_INTERVAL}s (max $((POLL_MAX * POLL_INTERVAL))s)..."
@@ -315,3 +460,4 @@ log "NLM PIPELINE COMPLETE"
 log "Output folder : $OUT_DIR"
 log "Ops log       : $OPS_LOG"
 log "=================================================================="
+notify "YT Ingest: summary ready" "${YT_TITLE:-$URL}"
