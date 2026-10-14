@@ -10,12 +10,14 @@ One click in the browser → files on disk, ready for Obsidian or any downstream
 Firefox button click
   → native host saves URL to bookmarks.txt
   → fires on_bookmark.sh in background
+      → skips if this video (by ID) was already summarized
       → creates NotebookLM notebook
-      → adds YouTube URL as source
+      → adds YouTube URL as source, waits until it's indexed
       → generates technical summary report + infographic
-      → polls until both are ready (~2 min)
+      → polls until both are ready (~2–3 min)
       → downloads to output/YYYY-MM-DD_<title-slug>/
       → writes manifest.json
+      → desktop notification: summary ready / failed (with reason)
 ```
 
 ## Prerequisites
@@ -32,7 +34,9 @@ After installing `nlm`, authenticate once:
 nlm login
 ```
 
-Sessions expire. Re-run `nlm login` if the pipeline logs an auth error.
+Sessions expire. Re-run `nlm login` if the pipeline logs an auth error — you'll also get a "YT Ingest failed" desktop notification.
+
+Tested with `nlm` 0.15.4. That release changed `notebook create` to print JSON and reports finished custom reports as status `unknown`; the script handles both (and the older text format).
 
 ## Setup
 
@@ -148,7 +152,7 @@ yt-ingest-pipeline/
 ├── ingest.log                          # Pipeline log (gitignored)
 ├── host_debug.log                      # Native host debug trace (gitignored)
 └── output/                             # Generated artifacts (gitignored)
-    └── YYYY-MM-DD_<slug>/
+    └── YYYY-MM-DD_<slug>/              # -2, -3… suffix if the folder already exists
         ├── summary.md
         ├── infographic.png
         ├── manifest.json
@@ -156,6 +160,8 @@ yt-ingest-pipeline/
 ```
 
 ## Monitoring
+
+Each run ends with a desktop notification — success, failure (with the reason from the log), or "already summarized". On macOS this uses `osascript`; on Linux, `notify-send` if installed. Notifications are best-effort: if no notifier is available nothing is shown and the pipeline is unaffected.
 
 ```bash
 # Watch the pipeline in real time
@@ -239,4 +245,11 @@ Check `ingest.log` for the error message and `output/<slug>/nlm_ops.log` for the
 
 - `nlm CLI not found` — `nlm` isn't in the PATH locations the script prepends. Find it with `which nlm` and add its directory to the `PATH=` line in `on_bookmark.sh`.
 - `nlm session expired` — run `nlm login` and retry.
+- `nlm notebook create returned an empty ID` / polls stuck on `unknown` — `nlm` changed its output format again. Compare the raw output in `nlm_ops.log` with the parsers in `on_bookmark.sh`.
 - Artifact generation failed — the notebook is retained with its ID in the log; inspect it manually with `nlm studio status <id>`.
+
+**Re-bookmarking does nothing / "already summarized"**
+
+Videos that already have a complete output folder are skipped (matched by video ID). To regenerate, delete that folder under `output/` and bookmark again, or set `skip_if_already_processed` to `false`. Failed runs never count as complete, so they can always be retried by re-bookmarking.
+
+A second bookmark of the same video while a run is still in progress is also skipped (lock: `output/.inflight-<video-id>`, auto-removed on exit, treated as stale after 30 min).
